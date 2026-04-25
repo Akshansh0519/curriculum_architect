@@ -160,6 +160,27 @@ class ExaminerEnvironment(Environment):
 
         raise ValueError(f"Unknown action_type: {action.action_type}")
 
+    def render(self) -> str:
+        if self._kb is None:
+            return "<uninitialized>"
+        lines = ["The Examiner — Episode Transcript", ""]
+        for idx, qa in enumerate(self._history, start=1):
+            lines.append(f"Q{idx} (section {qa.get('section_id')}): {qa.get('question')}")
+            lines.append(f"A{idx}: {qa.get('answer')}")
+            lines.append("")
+        return "\n".join(lines).strip()
+
+    def get_metrics(self) -> dict:
+        # Available after classify (or forced termination).
+        if not self._partition:
+            return {}
+        turns_used = self._turn_counter
+        eff = ((self._max_turns - turns_used) / self._max_turns) if self._max_turns else 0.0
+        return {
+            "turns_used": turns_used,
+            "efficiency": eff,
+        }
+
     @property
     def state(self) -> State:
         return self._state

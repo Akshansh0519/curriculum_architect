@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from typing import Dict, Literal, Optional
 
 
@@ -18,6 +19,11 @@ class ScriptedStudent:
     def _get_pipe(self):
         if self._pipe is not None:
             return self._pipe
+        # Never auto-download large models during local smoke tests / CI.
+        # Opt-in if you actually want HF model inference here.
+        if os.getenv("EXAMINER_ENABLE_HF_STUDENT", "").lower() not in {"1", "true", "yes"}:
+            self._pipe = None
+            return None
         try:
             from transformers import pipeline  # type: ignore
 
@@ -25,6 +31,7 @@ class ScriptedStudent:
                 "text-generation",
                 model=self.student_model_id,
                 device_map="auto",
+                local_files_only=True,
             )
             return self._pipe
         except Exception:
