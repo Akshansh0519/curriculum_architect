@@ -21,16 +21,23 @@ def _load_text(path: Path, fallback: str) -> str:
     return path.read_text(encoding="utf-8") if path.exists() else fallback
 
 
+def _asset_status(path: Path) -> str:
+    return "Ready" if path.exists() and path.stat().st_size > 0 else f"Missing: {path.name}"
+
+
 def run_examination_episode(difficulty: str) -> Tuple[list[tuple[str, str]], str, str]:
-    transcript = [
-        ("Examiner", f"[{difficulty}] Explain gradient descent in one line."),
-        ("Student", "Gradient descent minimizes loss by moving opposite gradient."),
-        ("Examiner", "Why can fixed LR fail near saddle points?"),
-        ("Student", "It can oscillate because curvature differs by direction."),
-    ]
-    result = "Predicted: FAKING in section 4 | Ground truth: FAKING in section 4"
-    reward = "Episode reward: 0.58"
-    return transcript, result, reward
+    try:
+        transcript = [
+            ("Examiner", f"[{difficulty}] Explain gradient descent in one line."),
+            ("Student", "Gradient descent minimizes loss by moving opposite gradient."),
+            ("Examiner", "Why can fixed LR fail near saddle points?"),
+            ("Student", "It can oscillate because curvature differs by direction."),
+        ]
+        result = "Predicted: FAKING in section 4 | Ground truth: FAKING in section 4"
+        reward = "Episode reward: 0.58"
+        return transcript, result, reward
+    except Exception as exc:  # pragma: no cover - UI fallback path
+        return [("System", "Episode failed. Check server logs.")], f"Error: {exc}", "Episode reward: N/A"
 
 
 with gr.Blocks(title="The Examiner") as demo:
@@ -49,6 +56,11 @@ with gr.Blocks(title="The Examiner") as demo:
         )
 
     with gr.Tab("📊 Training Results"):
+        gr.Markdown(
+            f"Assets status -> reward: {_asset_status(ASSETS / 'reward_curve.png')} | "
+            f"accuracy: {_asset_status(ASSETS / 'accuracy_curve.png')} | "
+            f"architecture: {_asset_status(ASSETS / 'architecture.png')}"
+        )
         gr.Image(value=str(ASSETS / "reward_curve.png"), label="Reward Curve")
         gr.Image(value=str(ASSETS / "accuracy_curve.png"), label="Accuracy Curve")
         with gr.Row():
