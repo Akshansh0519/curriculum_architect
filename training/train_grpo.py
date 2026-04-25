@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import logging
 import math
 import os
 import re
 from dataclasses import asdict
 from statistics import mean
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import wandb
 from trl import GRPOConfig, GRPOTrainer
@@ -20,6 +21,11 @@ LOGGER = logging.getLogger(__name__)
 LABEL_KNOWS = "KNOWS"
 LABEL_FAKING = "FAKING"
 SECTION_PATTERN = re.compile(r"(\d+)\s*[:=\-]\s*(KNOWS|FAKING)", re.IGNORECASE)
+ASK_PATTERN = re.compile(
+    r"section[_\s]+(\d+)[:\s]+(.+?)(?=section[_\s]+\d+|classify|$)",
+    re.IGNORECASE | re.DOTALL,
+)
+
 REQUIRED_WANDB_METRICS = (
     "total_reward",
     "accuracy",
@@ -30,65 +36,14 @@ REQUIRED_WANDB_METRICS = (
     "kl_divergence",
 )
 
-
-class EnvironmentRewardAdapter:
-    """C2-owned adapter; can run offline or HTTP env mode."""
-
-    def __init__(self, cfg: TrainingConfig) -> None:
-        self.cfg = cfg
-        self._episode_count = 0
-        self._offline_truth = self._make_dummy_truth(cfg.env_sections)
-
-    @staticmethod
-    def _make_dummy_truth(n_sections: int) -> Dict[int, str]:
-        return {idx: (LABEL_KNOWS if idx % 2 == 0 else LABEL_FAKING) for idx in range(n_sections)}
-
-    def _compute_classification_metrics(
-        self,
-        predicted: Dict[int, str],
-        truth: Dict[int, str],
-        turns_used: int,
-        max_turns: int,
-    ) -> Dict[str, float]:
-        correct = 0
-        false_accusations = 0
-        for section_id in truth:
-            predicted_label = predicted.get(section_id, LABEL_KNOWS)
-            actual_label = truth[section_id]
-            if predicted_label == actual_label:
-                correct += 1
-            elif predicted_label == LABEL_FAKING and actual_label == LABEL_KNOWS:
-                false_accusations += 1
-                correct -= 1
-
-        denom = max(len(truth), 1)
-        accuracy_score = correct / denom
-        efficiency_score = max(max_turns - turns_used, 0) / max_turns
-        total_reward = 0.70 * accuracy_score - 0.50 * false_accusations + 0.20 * efficiency_score
-        return {
-            "total_reward": float(total_reward),
-            "accuracy": float(max((correct + len(truth)) / (2 * len(truth)), 0.0) if truth else 0.0),
-            "false_accusations": float(false_accusations),
-            "efficiency_score": float(efficiency_score),
-            "mean_turns_to_classify": float(turns_used),
-        }
-
-    def evaluate_completion(self, completion: str) -> Dict[str, float]:
-        # HTTP mode reserved for post-C1 integration using examiner_env/client.py.
-        # Until then, use deterministic offline scoring.
-        predicted = _parse_partition_from_completion(completion, n_sections=self.cfg.env_sections)
-        turns_used = min(self.cfg.max_turns, 6 + (self._episode_count % 5))
-        self._episode_count += 1
-        return self._compute_classification_metrics(
-            predicted=predicted,
-            truth=self._offline_truth,
-            turns_used=turns_used,
-            max_turns=self.cfg.max_turns,
-        )
-
-
-def _default_prompt_batch(batch_size: int, prompt_text: str) -> List[Dict[str, str]]:
-    return [{"role": "user", "content": prompt_text} for _ in range(batch_size)]
+DEMO_QUESTIONS = [
+    "Explain the core mechanism of this concept in one sentence.",
+    "Why does this approach fail on edge cases?",
+    "What is the causal chain that produces the main effect?",
+    "Give a specific numerical or mechanistic example.",
+    "How does this interact with gradient flow during training?",
+    "What breaks if you remove the key constraint?",
+]
 
 
 def _parse_partition_from_completion(completion: str, n_sections: int = 10) -> Dict[int, str]:
@@ -102,6 +57,16 @@ def _parse_partition_from_completion(completion: str, n_sections: int = 10) -> D
     return parsed
 
 
+def _parse_questions_from_completion(completion: str, n_sections: int = 10) -> List[Tuple[int, str]]:
+    questions: List[Tuple[int, str]] = []
+    for match in ASK_PATTERN.finditer(completion):
+        sid = int(match.group(1))
+        question = match.group(2).strip()[:300]
+        if 0 <= sid < n_sections and question:
+            questions.append((sid, question))
+    return questions
+
+
 def _ensure_finite(metrics: Dict[str, float]) -> None:
     for key, value in metrics.items():
         if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
@@ -113,6 +78,147 @@ def _validate_metric_payload(payload: Dict[str, float]) -> None:
     if missing:
         raise RuntimeError(f"Missing required metrics: {missing}")
     _ensure_finite(payload)
+
+
+async def _run_episode_async(
+    completion: str,
+    cfg: TrainingConfig,
+) -> Dict[str, float]:
+    """Run a real ExaminerEnvironment episode from a model completion.
+
+    Parses ask/classify actions from completion text, runs them against the
+    local environment, returns episode metrics.
+    """
+    from examiner_env.models import ExaminerAction
+    from examiner_env.server.examiner_environment import ExaminerEnvironment
+
+    env = ExaminerEnvironment()
+    obs = await env.reset()
+    n_sections = cfg.env_sections
+
+    questions = _parse_questions_from_completion(completion, n_sections=n_sections)
+    if not questions:
+        for turn in range(min(3, cfg.max_turns - 1)):
+            sid = turn % n_sections
+            questions.append((sid, DEMO_QUESTIONS[turn % len(DEMO_QUESTIONS)]))
+
+    turns_used = 0
+    for sid, question_text in questions[: cfg.max_turns - 1]:
+        action = ExaminerAction(
+            action_type="ask",
+            section_id=sid,
+            question_text=question_text,
+        )
+        result = await env.step(action)
+        turns_used += 1
+        if result.done:
+            metadata = result.observation.metadata or {}
+            return {
+                "total_reward": float(result.reward or -0.5),
+                "accuracy": float(metadata.get("accuracy", 0.0)),
+                "false_accusations": float(metadata.get("false_accusations", 0)),
+                "efficiency_score": float(
+                    max(cfg.max_turns - turns_used, 0) / cfg.max_turns
+                ),
+                "mean_turns_to_classify": float(turns_used),
+            }
+
+    classification = _parse_partition_from_completion(completion, n_sections=n_sections)
+    classify_action = ExaminerAction(
+        action_type="classify",
+        classification=classification,
+    )
+    result = await env.step(classify_action)
+    turns_used += 1
+    metadata = result.observation.metadata or {}
+
+    return {
+        "total_reward": float(result.reward or 0.0),
+        "accuracy": float(metadata.get("accuracy", 0.0)),
+        "false_accusations": float(metadata.get("false_accusations", 0)),
+        "efficiency_score": float(
+            max(cfg.max_turns - turns_used, 0) / cfg.max_turns
+        ),
+        "mean_turns_to_classify": float(turns_used),
+    }
+
+
+def _run_episode_sync(completion: str, cfg: TrainingConfig) -> Dict[str, float]:
+    """Sync wrapper around async episode runner."""
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            import nest_asyncio
+            nest_asyncio.apply()
+        return loop.run_until_complete(_run_episode_async(completion, cfg))
+    except Exception:
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(_run_episode_async(completion, cfg))
+        finally:
+            loop.close()
+
+
+class EnvironmentRewardAdapter:
+    """C2-owned adapter: runs real ExaminerEnvironment episodes.
+
+    Falls back to offline scoring if env import fails (e.g. during unit tests
+    before C1 env is installed). Set cfg.env_adapter_mode='offline' to force.
+    """
+
+    def __init__(self, cfg: TrainingConfig) -> None:
+        self.cfg = cfg
+        self._env_available = self._check_env_available()
+        if not self._env_available:
+            LOGGER.warning(
+                "ExaminerEnvironment not available. Using offline scoring. "
+                "Install examiner_env package before real training."
+            )
+
+    @staticmethod
+    def _check_env_available() -> bool:
+        try:
+            from examiner_env.server.examiner_environment import ExaminerEnvironment  # noqa: F401
+            return True
+        except Exception:
+            return False
+
+    def _offline_score(self, completion: str) -> Dict[str, float]:
+        n = self.cfg.env_sections
+        truth = {idx: (LABEL_KNOWS if idx % 2 == 0 else LABEL_FAKING) for idx in range(n)}
+        predicted = _parse_partition_from_completion(completion, n_sections=n)
+        correct = 0
+        false_accusations = 0
+        for section_id in truth:
+            p = predicted.get(section_id, LABEL_KNOWS)
+            t = truth[section_id]
+            if p == t:
+                correct += 1
+            elif p == LABEL_FAKING and t == LABEL_KNOWS:
+                false_accusations += 1
+                correct -= 1
+        accuracy_score = correct / max(n, 1)
+        efficiency_score = max(self.cfg.max_turns - 6, 0) / self.cfg.max_turns
+        total_reward = 0.70 * accuracy_score - 0.50 * false_accusations + 0.20 * efficiency_score
+        return {
+            "total_reward": float(total_reward),
+            "accuracy": float(max((correct + n) / (2 * n), 0.0)),
+            "false_accusations": float(false_accusations),
+            "efficiency_score": float(efficiency_score),
+            "mean_turns_to_classify": 6.0,
+        }
+
+    def evaluate_completion(self, completion: str) -> Dict[str, float]:
+        use_real = (
+            self._env_available
+            and self.cfg.env_adapter_mode != "offline"
+        )
+        if use_real:
+            try:
+                return _run_episode_sync(completion, self.cfg)
+            except Exception as exc:
+                LOGGER.warning("Real env episode failed (%s). Falling back to offline.", exc)
+        return self._offline_score(completion)
 
 
 def build_reward_fn(cfg: TrainingConfig):
@@ -146,6 +252,16 @@ def build_reward_fn(cfg: TrainingConfig):
     return reward_fn
 
 
+def _default_dataset(cfg: TrainingConfig) -> List[Dict[str, str]]:
+    prompt = (
+        "You are an expert Examiner. You will see section titles of a knowledge base. "
+        "Ask diagnostic questions (format: 'Section <id>: <question>') then classify "
+        "each section (format: '<id>: KNOWS or FAKING').\n\n"
+        f"{cfg.question_prompt}"
+    )
+    return [{"prompt": prompt}] * cfg.max_steps
+
+
 def _build_trainer(model: Any, tokenizer: Any, cfg: TrainingConfig) -> GRPOTrainer:
     train_cfg = GRPOConfig(
         output_dir=cfg.output_dir,
@@ -164,14 +280,12 @@ def _build_trainer(model: Any, tokenizer: Any, cfg: TrainingConfig) -> GRPOTrain
         num_generations=cfg.num_generations,
         beta=cfg.kl_penalty,
     )
-
-    dataset = [{"prompt": prompt} for prompt in _default_prompt_batch(cfg.max_steps, cfg.question_prompt)]
     reward_fn = build_reward_fn(cfg)
     return GRPOTrainer(
         model=model,
         processing_class=tokenizer,
         args=train_cfg,
-        train_dataset=dataset,
+        train_dataset=_default_dataset(cfg),
         reward_funcs=[reward_fn],
     )
 
