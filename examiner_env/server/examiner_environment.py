@@ -25,12 +25,12 @@ except Exception:  # pragma: no cover
 try:
     from ..knowledge_base import KnowledgeBase
     from ..models import ExaminerAction, ExaminerObservation, ExaminerState
-    from ..reward import compute_reward
+    from ..reward import compute_answer_divergence, compute_reward
     from ..student import ScriptedStudent
 except ImportError:
     from knowledge_base import KnowledgeBase  # type: ignore
     from models import ExaminerAction, ExaminerObservation, ExaminerState  # type: ignore
-    from reward import compute_reward  # type: ignore
+    from reward import compute_answer_divergence, compute_reward  # type: ignore
     from student import ScriptedStudent  # type: ignore
 
 
@@ -49,6 +49,8 @@ class ExaminerEnvironment(Environment):
         self._max_turns: int = 20
         self._rng = random.Random()
         self._student: Optional[ScriptedStudent] = None
+        # Populated after every classify step; returned by get_metrics()
+        self._last_episode_metrics: Dict[str, float] = {}
 
         self._state = ExaminerState(episode_id=str(uuid4()), step_count=0, max_turns=self._max_turns)
 
@@ -135,15 +137,50 @@ class ExaminerEnvironment(Environment):
                 genuine_baselines=self._genuine_baselines,
             )
 
-            # Simple metrics mirror reward components.
-            false_acc = sum(1 for i in range(10) if predicted.get(i) == "FAKING" and self._partition.get(i) == "KNOWS")
+            # ── Accuracy component ─────────────────────────────────────────
+            false_acc = 0
             correct = 0
             for i in range(10):
                 p = predicted.get(i)
                 t = self._partition.get(i)
                 if p == t and p is not None:
                     correct += 1
+                elif p == "FAKING" and t == "KNOWS":
+                    false_acc += 1
             acc01 = correct / 10.0
+
+            # ── Efficiency component ────────────────────────────────────────
+            eff = ((self._max_turns - turns_used) / self._max_turns) if self._max_turns else 0.0
+
+            # ── Diagnostic quality component (mirrors reward.py) ────────────
+            per_section_last: Dict[int, str] = {}
+            for item in self._history:
+                try:
+                    sid = int(item.get("section_id"))  # type: ignore[arg-type]
+                except Exception:
+                    continue
+                ans = item.get("answer")
+                if isinstance(ans, str):
+                    per_section_last[sid] = ans
+
+            divs = []
+            for sid, lbl in self._partition.items():
+                if lbl != "FAKING" or sid not in per_section_last:
+                    continue
+                divs.append(
+                    compute_answer_divergence(
+                        per_section_last[sid], self._genuine_baselines.get(sid, "")
+                    )
+                )
+            diag_score = (sum(divs) / len(divs)) * 0.10 if divs else 0.0
+
+            # ── Store for get_metrics() and expose in obs.metadata ──────────
+            self._last_episode_metrics = {
+                "accuracy": acc01,
+                "false_accusations": float(false_acc),
+                "efficiency": eff,
+                "diagnostic_score": diag_score,
+            }
 
             obs = ExaminerObservation(
                 section_titles=self._kb.section_titles(),
@@ -153,11 +190,7 @@ class ExaminerEnvironment(Environment):
                 belief_scratchpad="",
                 done=True,
                 reward=float(r),
-                metadata={
-                    "accuracy": acc01,
-                    "false_accusations": false_acc,
-                    "turns_used": turns_used,
-                },
+                metadata=dict(self._last_episode_metrics),
             )
             return obs, float(obs.reward or 0.0), bool(obs.done)
 
@@ -171,7 +204,8 @@ class ExaminerEnvironment(Environment):
         obs, reward, done = self._do_step(action)
         return StepResult(observation=obs, reward=reward, done=done)
 
-    async def state(self) -> ExaminerState:
+    async def get_state(self) -> ExaminerState:
+        """Async accessor for episode state (use env.state property for synchronous access)."""
         return self._state
 
     # ---------- OpenEnv HTTP server compatibility ----------
@@ -194,15 +228,12 @@ class ExaminerEnvironment(Environment):
         return "\n".join(lines).strip()
 
     def get_metrics(self) -> dict:
-        # Available after classify (or forced termination).
-        if not self._partition:
-            return {}
-        turns_used = self._turn_counter
-        eff = ((self._max_turns - turns_used) / self._max_turns) if self._max_turns else 0.0
-        return {
-            "turns_used": turns_used,
-            "efficiency": eff,
-        }
+        """Return the 4-component breakdown from the most recent classify step.
+
+        Keys: accuracy, false_accusations, efficiency, diagnostic_score.
+        Returns an empty dict if no classify has been submitted yet.
+        """
+        return dict(self._last_episode_metrics)
 
     @property
     def state(self) -> State:
