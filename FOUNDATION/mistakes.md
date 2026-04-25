@@ -29,7 +29,8 @@ Read guardrails.md for full constraints.
 
 | # | Category | Description | Session | Severity | MSR Risk |
 |---|---|---|---|---|---|
-| | | *No mistakes logged yet* | | | |
+| 1 | INTEGRATION_BREAK | C1 sync methods / wrong StepResult contract | C1-S1 | 🔴 | MSR-1 |
+| 2 | OWNERSHIP_VIOLATION | C2 attempted to edit C1 environment files | C2-S1 | 🔴 | MSR-1 |
 
 ---
 
@@ -107,7 +108,7 @@ Read guardrails.md for full constraints.
 - **Description:** Implemented `reset()`/`step()` as sync functions returning `Observation`, which failed our Phase 1 validator gate expecting `async def` contract and `StepResult` return from `step()`.
 - **MSR at risk:** MSR-1
 - **Judging criterion impacted:** ENV_INNOV
-- **Root cause:** Confusion between OpenEnv HTTP server expectations (returns `Observation`) and our validator’s direct-environment contract (expects async + `StepResult`).
+- **Root cause:** Confusion between OpenEnv HTTP server expectations (returns `Observation`) and our validator's direct-environment contract (expects async + `StepResult`).
 - **Fix:** Made `reset()`/`step()` async, returned `StepResult` from `step()`, and added `reset_async()`/`step_async()` shims returning `Observation` to preserve HTTP server compatibility.
 - **Corrected prompt:** "Implement async `reset()`/`step()` for validator; keep `reset_async()`/`step_async()` returning Observation for OpenEnv HTTP server."
 - **Time lost:** ~25 minutes
@@ -115,6 +116,42 @@ Read guardrails.md for full constraints.
 ### MSR Status After Session
 - MSR-1: OPEN
 - MSR-2: CLOSED (C2-owned)
+- MSR-3: OPEN
+- MSR-4: OPEN
+- MSR-5: OPEN
+- MSR-6: OPEN
+- MSR-7: OPEN
+- MSR-8: OPEN
+- MSR-9: OPEN
+
+---
+
+## Session 1 — 2026-04-25 — C2
+
+### Work Done
+- Implemented core training pipeline (config, train_grpo, colab_notebook).
+- Implemented scripts (generate_plots, select_transcripts).
+- Implemented HF Space app.
+- Checkpoint 2 hardening: config validation, strict metrics, resume support, W&B retry, transcript scoring, Space asset status.
+
+### Mistakes Encountered
+
+#### Mistake C2-1-1
+- **Category:** OWNERSHIP_VIOLATION
+- **Severity:** 🔴
+- **File:** examiner_env/server/examiner_environment.py (attempted)
+- **Description:** C2 attempted to modify C1's core environment logic using Cursor.
+- **MSR at risk:** MSR-1
+- **Judging criterion impacted:** ENV_INNOV
+- **Original prompt that caused it:** N/A (manual edit attempt)
+- **Root cause:** Human error / Cursor auto-suggestion context.
+- **Fix:** Revert any changes to C1 files. Adhere strictly to project_structure.md ownership.
+- **Corrected prompt:** N/A
+- **Time lost:** 5 minutes
+
+### MSR Status After Session
+- MSR-1: OPEN
+- MSR-2: CLOSED
 - MSR-3: OPEN
 - MSR-4: OPEN
 - MSR-5: OPEN
