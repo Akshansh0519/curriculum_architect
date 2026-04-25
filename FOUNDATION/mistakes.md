@@ -93,4 +93,32 @@ Read guardrails.md for full constraints.
 
 # Session Logs
 
-*No sessions logged yet.*
+## Session 1 — 2026-04-25 — C1
+
+### Work Done
+- Phase 1 environment core implementation + merge prep
+
+### Mistakes Encountered
+
+#### Mistake 1-1
+- **Category:** INTEGRATION_BREAK
+- **Severity:** 🔴
+- **File:** `examiner_env/server/examiner_environment.py`
+- **Description:** Implemented `reset()`/`step()` as sync functions returning `Observation`, which failed our Phase 1 validator gate expecting `async def` contract and `StepResult` return from `step()`.
+- **MSR at risk:** MSR-1
+- **Judging criterion impacted:** ENV_INNOV
+- **Root cause:** Confusion between OpenEnv HTTP server expectations (returns `Observation`) and our validator’s direct-environment contract (expects async + `StepResult`).
+- **Fix:** Made `reset()`/`step()` async, returned `StepResult` from `step()`, and added `reset_async()`/`step_async()` shims returning `Observation` to preserve HTTP server compatibility.
+- **Corrected prompt:** "Implement async `reset()`/`step()` for validator; keep `reset_async()`/`step_async()` returning Observation for OpenEnv HTTP server."
+- **Time lost:** ~25 minutes
+
+### MSR Status After Session
+- MSR-1: OPEN
+- MSR-2: CLOSED (C2-owned)
+- MSR-3: OPEN
+- MSR-4: OPEN
+- MSR-5: OPEN
+- MSR-6: OPEN
+- MSR-7: OPEN
+- MSR-8: OPEN
+- MSR-9: OPEN
