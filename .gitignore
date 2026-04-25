@@ -1,0 +1,13 @@
+.env
+outputs/checkpoints/
+outputs/logs/
+_quarantine/
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+dist/
+build/
+.ipynb_checkpoints/
+.gemini/
+
