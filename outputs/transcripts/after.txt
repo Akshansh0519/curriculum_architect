@@ -1,0 +1,2 @@
+Episode ~400 trained transcript placeholder.
+Replace by running: python scripts/select_transcripts.py --entity <entity> --run-id <run_id>
