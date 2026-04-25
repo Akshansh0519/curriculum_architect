@@ -12,9 +12,10 @@ from __future__ import annotations
 
 from uuid import uuid4
 import random
-from typing import Dict, Literal, Optional
+from typing import Dict, Literal, Optional, Tuple
 
 from openenv.core import Environment
+from openenv.core.client_types import StepResult
 
 try:
     from openenv.core.env_server.types import State
@@ -51,7 +52,7 @@ class ExaminerEnvironment(Environment):
 
         self._state = ExaminerState(episode_id=str(uuid4()), step_count=0, max_turns=self._max_turns)
 
-    def reset(self, seed: Optional[int] = None, episode_id: Optional[str] = None, **kwargs) -> ExaminerObservation:
+    def _do_reset(self, seed: Optional[int], episode_id: Optional[str], **kwargs) -> ExaminerObservation:
         self._rng = random.Random(seed)
         self._kb = KnowledgeBase(domain=kwargs.get("kb_domain", "ml_theory"))
         self._history = []
@@ -85,7 +86,7 @@ class ExaminerEnvironment(Environment):
             metadata={"partition_k": k},
         )
 
-    def step(self, action: ExaminerAction, timeout_s: Optional[float] = None, **kwargs) -> ExaminerObservation:  # type: ignore[override]
+    def _do_step(self, action: ExaminerAction) -> Tuple[ExaminerObservation, Optional[float], bool]:
         if self._kb is None:
             raise RuntimeError("Environment not reset. Call reset() first.")
 
@@ -107,7 +108,7 @@ class ExaminerEnvironment(Environment):
             remaining = max(0, self._max_turns - self._turn_counter)
             forced_done = self._turn_counter >= self._max_turns
 
-            return ExaminerObservation(
+            obs = ExaminerObservation(
                 section_titles=self._kb.section_titles(),
                 question_history=self._history,
                 turn_counter=self._turn_counter,
@@ -117,6 +118,7 @@ class ExaminerEnvironment(Environment):
                 reward=(-0.5 if forced_done else 0.0),
                 metadata={"forced_terminate": forced_done},
             )
+            return obs, float(obs.reward or 0.0), bool(obs.done)
 
         if action.action_type == "classify":
             if not action.classification:
@@ -143,7 +145,7 @@ class ExaminerEnvironment(Environment):
                     correct += 1
             acc01 = correct / 10.0
 
-            return ExaminerObservation(
+            obs = ExaminerObservation(
                 section_titles=self._kb.section_titles(),
                 question_history=self._history,
                 turn_counter=self._turn_counter,
@@ -157,8 +159,50 @@ class ExaminerEnvironment(Environment):
                     "turns_used": turns_used,
                 },
             )
+            return obs, float(obs.reward or 0.0), bool(obs.done)
 
         raise ValueError(f"Unknown action_type: {action.action_type}")
+
+    # ---------- Async-first API (validator gate expects this) ----------
+    async def reset(self, seed: Optional[int] = None, episode_id: Optional[str] = None, **kwargs) -> ExaminerObservation:
+        return self._do_reset(seed=seed, episode_id=episode_id, **kwargs)
+
+    async def step(self, action: ExaminerAction, timeout_s: Optional[float] = None, **kwargs) -> StepResult[ExaminerObservation]:  # type: ignore[override]
+        obs, reward, done = self._do_step(action)
+        return StepResult(observation=obs, reward=reward, done=done)
+
+    async def state(self) -> ExaminerState:
+        return self._state
+
+    # ---------- OpenEnv HTTP server compatibility ----------
+    async def reset_async(self, seed: Optional[int] = None, episode_id: Optional[str] = None, **kwargs) -> ExaminerObservation:  # type: ignore[override]
+        # HTTPEnvServer checks override of reset_async/step_async; it expects Observation, not StepResult.
+        return self._do_reset(seed=seed, episode_id=episode_id, **kwargs)
+
+    async def step_async(self, action: ExaminerAction, timeout_s: Optional[float] = None, **kwargs) -> ExaminerObservation:  # type: ignore[override]
+        obs, _reward, _done = self._do_step(action)
+        return obs
+
+    def render(self) -> str:
+        if self._kb is None:
+            return "<uninitialized>"
+        lines = ["The Examiner — Episode Transcript", ""]
+        for idx, qa in enumerate(self._history, start=1):
+            lines.append(f"Q{idx} (section {qa.get('section_id')}): {qa.get('question')}")
+            lines.append(f"A{idx}: {qa.get('answer')}")
+            lines.append("")
+        return "\n".join(lines).strip()
+
+    def get_metrics(self) -> dict:
+        # Available after classify (or forced termination).
+        if not self._partition:
+            return {}
+        turns_used = self._turn_counter
+        eff = ((self._max_turns - turns_used) / self._max_turns) if self._max_turns else 0.0
+        return {
+            "turns_used": turns_used,
+            "efficiency": eff,
+        }
 
     @property
     def state(self) -> State:
