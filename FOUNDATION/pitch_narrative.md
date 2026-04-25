@@ -1,6 +1,8 @@
 # 🎭 The Reverse Turing Test: Introducing 'The Examiner'
 ## The Pitch Narrative for Hackathon Judges
 
+![The Examiner Concept Art](file:///C:/Users/AKSHANSH%20RANJAN/.gemini/antigravity/brain/ce5a64f6-2c17-4634-aa79-7bdb0be922b7/the_examiner_concept_art_1777096506018.png)
+
 > **The Hook:** "In an era where every AI is trained to sound like an expert, how do you find the one that actually *is* one? We don't need better answers; we need an AI that knows how to ask the questions that break the fakers."
 
 ---
