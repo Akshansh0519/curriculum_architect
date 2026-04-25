@@ -1,0 +1,5 @@
+gradio>=5.0
+openenv-core
+transformers
+torch
+wandb>=0.19
